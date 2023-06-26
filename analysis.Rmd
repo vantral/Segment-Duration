@@ -1,0 +1,349 @@
+---
+title: "Exploring durations"
+output: html_document
+date: "2023-06-25"
+---
+
+# Exploring Durations across Different Languages
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE, message=FALSE)
+```
+
+```{r}
+library(tidyverse)
+library(reshape2)
+library(stargazer)
+library(jtools)
+```
+
+The aim of this research is to investigate the duration of sounds and words across a variety of languages. Specifically, I will examine the differences in duration of vowels and sibilants.
+
+Additionally, I will investigate whether speech rate differs between males and females in various languages, including minority languages.
+
+## Theoretical Background
+
+The International Phonetic Alphabet (IPA) is a standardized set of symbols used to represent the sounds of all languages. While the IPA aims to provide a finite set of segments to unify sounds across languages, it is well-known that the segments are not identical.
+
+One factor that can vary among these segments is duration. Previous research has shown that the duration of vowels and sibilants can differ across languages.
+
+```{r}
+vowels <- c("a", "o", "u", "e", "i")
+sibilants <- c("s", "z", "s`", "z`", "s\\", "z\\")
+sounds <- append(vowels, sibilants)
+```
+
+In this research, I aim to test whether the duration of vowels and sibilants significantly differs across different languages. To do this, I will analyze speech data from the DoReCo dataset.
+
+## Data
+
+DoReCo dataset is available online on <https://doreco.huma-num.fr/>. I used the core subset of DoReCo which includes 51 languages.
+
+For each language there are a file with phonemes and a file with metadata on speakers. They look as follows.
+
+```{r}
+read_csv(file.path(
+    "data",
+    sprintf("doreco_%s_core", "even1259"),
+    sprintf("doreco_%s_ph.csv", "even1259")
+    ))
+```
+
+```{r}
+read_csv(file.path(
+    "data",
+    sprintf("doreco_%s_core", "even1259"),
+    sprintf("doreco_%s_metadata.csv", "even1259")),
+    col_types = "iccccccccccccccc")
+```
+
+### Prepocessing
+
+```{r}
+dataset_by_language <- function(language_name, segments=TRUE) {
+  
+  # reading dataset with phonemes
+  
+  df <- read_csv(file.path(
+    "data",
+    sprintf("doreco_%s_core", language_name),
+    sprintf("doreco_%s_ph.csv", language_name)
+    ))
+  
+  
+  # reading dataset with metadata and extracting only spk_code and spk_sex 
+  
+  meta <- read_csv(file.path(
+    "data",
+    sprintf("doreco_%s_core", language_name),
+    sprintf("doreco_%s_metadata.csv", language_name)),
+    col_types = "iccccccccccccccc") %>% 
+    select(spk_code, spk_sex) 
+
+  df %>% 
+    mutate(
+      left_context = lag(ph),
+      right_context = lead(ph),
+      duration = end - start) %>% 
+    select(ph, duration, left_context, right_context, speaker) -> df
+  
+  
+  # condition on extracting only vowels and sibilants or all segments
+  
+  if (segments) {df <- df %>% filter(ph %in% append(vowels, sibilants))}
+  
+  df$language <- language_name
+  
+  df <- unique(merge(df, meta, by.x = "speaker", by.y = "spk_code"))
+  
+  
+  return(df)
+}
+
+```
+
+Here I collect data about all vowels and sibilants in 51 languages from DoReCo.
+
+```{r}
+languages <- read_csv("doreco_languages_metadata_v1.2.csv")
+
+dataset <- data.frame()
+
+for (lang in languages$Glottocode) {
+  print(lang)
+  df <- dataset_by_language(lang)
+  
+  df$speaker <- as.character(df$speaker)
+  
+  dataset <- bind_rows(dataset, df)
+  
+}
+```
+
+Dataset:
+
+```{r}
+head(dataset)
+```
+
+## Analysis
+
+### Segement duration
+
+The data is split by the type of a segment.
+
+```{r}
+vowels_dataset <- dataset %>% filter(ph %in% vowels)
+sibilants_dataset <- dataset %>% filter(ph %in% sibilants)
+```
+
+Some visualisations on the datasets.
+
+```{r}
+analyse_dataset <- function(df, segments, outliers, ph) {
+  
+  df %>% 
+    select(ph, language) %>% 
+    unique() %>% 
+    group_by(ph) %>% 
+    summarise(n = length(language)) -> smr
+  
+  print(smr)
+  
+  df %>%
+  filter(language %in% sample(languages$Glottocode, 10)) %>% 
+  ggplot(aes(ph, duration, fill=ph)) +
+    geom_violin() +
+    facet_wrap(~language) +
+    stat_summary(fun=mean, geom="point", size=1, color="white") -> g
+  
+  print(g)
+  
+  df %>%
+    filter(language %in% sample(languages$Glottocode, 10)) %>% 
+    ggplot(aes(language, duration, fill=language)) +
+      geom_violin() +
+      facet_wrap(~ph) +
+      scale_x_discrete(guide = guide_axis(angle = 90))+
+      stat_summary(fun=mean, geom="point", size=1, color="white")+
+      ylim(c(0, 0.5)) -> g
+  
+  print(g)
+  
+  df %>%
+    filter(language %in% outliers) %>% 
+    filter(ph == ph) %>% 
+    t.test(data=., duration ~ language) -> res
+  
+  df %>%
+    filter(language %in% outliers) %>% 
+    filter(ph == ph) %>% 
+    ggplot(aes(language, duration, fill=language)) +
+      geom_boxplot() +
+      ggtitle(sprintf("p-value is equal to %s", res$p.value)) -> g
+  
+  print(g)
+  
+  df %>%
+    filter(language %in% outliers) %>% 
+    filter(ph == ph) %>% 
+    t.test(data=., duration ~ language)
+  
+  for (segment in segments) {
+    df %>%
+      filter(ph == segment) %>% 
+      aov(duration ~ language, data=.) -> res 
+    
+    print(sprintf("P-value of ANOVA is equal to %s",
+                  summary(res)[[1]][["Pr(>F)"]][1]))
+    
+    TukeyHSD(res) -> tukey
+    
+    data.frame(tukey$language) %>% 
+      filter(`p.adj` < 0.05) -> signf
+    
+    print(sprintf("%s: %s pairs out of %s are significant (%s%%)",
+                  segment, nrow(signf), nrow(tukey$language),
+                  round(nrow(signf) / nrow(tukey$language) * 100)
+                  )
+          )  }
+}
+```
+
+I show:
+
+-   in how may languages the segments in question occur
+-   distribution of the segements in ten randomly selected languages (facet by language)
+-   distribution of the segments across ten randomly selected languages (facet by segment)
+-   duration of an arbitrary selected segment in two arbitrary selected languages
+-   the results of ANOVA and the proportion of significant p-values according to TukeyHSD
+
+```{r}
+analyse_dataset(vowels_dataset, vowels,
+                outliers=c("ruul1235", "kama1351"), ph="o")
+```
+
+```{r}
+analyse_dataset(sibilants_dataset, sibilants,
+                outliers = c("apah1238", "beja1238"), ph="s")
+```
+
+Now, I proceed to Pearson's correlation. My goal was to show that languages are not simply divided into fast and slow, so the mean duration of the segments of one type do not directly influence the mean duration of another type.
+
+```{r}
+# labeling segments either as v[owel] or s[ibilant]
+dataset$type <- ifelse(dataset$ph %in% vowels, "v", "s")
+
+# counting mean duration
+dataset %>% 
+  group_by(type, language) %>% 
+  summarise(dur = mean(duration)) -> smr
+
+# reshaping into wide format
+reshape(as.data.frame(smr), direction = "wide",
+        idvar="language", timevar="type") %>% 
+  drop_na() -> wide_smr
+
+# calculating
+cor(wide_smr$dur.s, wide_smr$dur.v)
+```
+
+The correlation score is very low, so my hypothesis is correct.
+
+Now I proceed to linear regression prediction. Unfortunately, I have a lot of data and my devices are unable to compute it based on the whole dataset. So, I randomly choose 10,000 rows and belive that the result can be extrapolated on the whole data.
+
+```{r}
+label_encoding <- function(column) {
+  return(as.numeric(as.factor(column)))
+}
+
+dataset %>% 
+  mutate(left_context_cat=label_encoding(left_context),
+         right_context_cat=label_encoding(right_context),
+         language_cat=label_encoding(language)
+         ) -> data
+
+data_kk <- data[sample(nrow(data), 10000), ]
+
+
+
+fit <- lm(
+  duration ~ left_context_cat + right_context_cat + language_cat,
+  data=data_kk
+  )
+summ(fit)
+```
+
+Linear regression pretty failed, R2 is near zero. So, the analysis of p-values here seems meaningless.
+
+### Speech rate
+
+Now I turn to the second part of the analysis: speech rate. Research suggests that speech rate can differ between males and females in certain languages, and this difference has been investigated in well-documented languages (Pépiot 2014). However, little research has been conducted on the speech rate differences between genders in minority languages.
+
+```{r warning=FALSE, message=FALSE}
+languages <- read_csv("doreco_languages_metadata_v1.2.csv")
+
+dataset_words <- data.frame()
+
+for (lang in languages$Glottocode) {
+  print(lang)
+  df <- dataset_by_language(lang, FALSE)
+  
+  df$speaker <- as.character(df$speaker)
+  
+  dataset_words <- bind_rows(dataset_words, df)
+  
+}
+```
+
+This time, it is important to clear the dataset since there are some symbols that indicate different types of pauses, which I do not know how to take into account yet.
+
+```{r}
+dataset_words %>% 
+  filter(!grepl("[<>{}]", ph)) -> dataset_words_clear
+```
+
+Now, for each language I count mean durations across different speakers and test whether the distribution is shifted in a way that males are at one end of a scale and women are at the other. I use Mann--Whitney U test to estimate whether the shift is not equal to zero.
+
+```{r}
+
+wilc_data <- data.frame()
+
+for (lang in languages$Glottocode) {
+  dataset_words_clear %>% 
+    filter(language == lang) %>% 
+    group_by(speaker, spk_sex) %>% 
+    summarise(dur = mean(duration)) -> smr
+  
+  if (length(unique(smr$spk_sex)) == 2) {
+    res <- wilcox.test(dur ~ spk_sex,
+                       data = smr,
+                       exact = FALSE)$p.value
+  } else {res <- NA}
+  
+  wilc_data <- bind_rows(wilc_data,
+                         data.frame(language = as.character(lang),
+                                    p.value = res))
+}
+
+wilc_data %>% 
+  filter(p.value < 0.05)
+```
+
+Among all languages, only one showed significant results: Orkon-Fanbak (Austronesian). However, the results are puzzling since it is usually claimed that female speech rate is greater. However, we see from the data that for these languages mean male duration is usually less than mean female duration. However, of course this data is not enough to make far-reaching conclusions.
+
+```{r}
+dataset_words_clear %>% 
+  filter(language == "orko1234") %>% 
+  group_by(speaker, spk_sex) %>% 
+  summarise(mean_dur = mean(duration)) -> orko
+
+orko[order(orko$mean_dur), ]
+
+```
+
+## Summary
+
+-   Vowels are not the same across languages. /a/, /i/ and /u/ show the greatest variation. I believe this because they constitute the basic minimal vowel inventory
+-   The same holds for sibilants. /s/ shows the higher degree of variation and is more often found in the languages of the world
+-   Speech rate of males and females is the same across languages
